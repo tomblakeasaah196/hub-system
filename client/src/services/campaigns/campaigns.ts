@@ -243,6 +243,38 @@ export interface EnquiryList {
   counts: { total: number; new: number; replied: number; closed: number };
 }
 
+export interface EnquiryAttachment {
+  attachment_id?: string;
+  document_id: string;
+  display_name: string | null;
+}
+
+export interface EnquiryThreadMessage {
+  message_id: string;
+  channel_id: string;
+  content: string | null;
+  is_deleted: boolean;
+  message_type: string;
+  sender_user_id: string | null;
+  sender_contact_id: string | null;
+  sender_name: string | null;
+  sender_kind: "staff" | "customer" | "system";
+  attachments: EnquiryAttachment[];
+  created_at: string;
+}
+
+export interface EnquiryDetail {
+  enquiry: Enquiry;
+  channel: {
+    channel_id: string;
+    name: string | null;
+    metadata: Record<string, unknown> | null;
+    created_at: string;
+    updated_at: string;
+  } | null;
+  messages: EnquiryThreadMessage[];
+}
+
 export async function listEnquiries(
   params: {
     search?: string;
@@ -253,6 +285,11 @@ export async function listEnquiries(
   const { data } = await api.get<EnquiryList>("/campaigns/enquiries", {
     params,
   });
+  return data;
+}
+
+export async function getEnquiry(id: string): Promise<EnquiryDetail> {
+  const { data } = await api.get<EnquiryDetail>(`/campaigns/enquiries/${id}`);
   return data;
 }
 
@@ -272,10 +309,11 @@ export async function setEnquiryStatus(
 export async function replyToEnquiry(
   id: string,
   message: string,
+  attachments: { document_id: string; display_name: string }[] = [],
 ): Promise<{ ok: boolean; channel_id: string }> {
   const { data } = await api.post<{ ok: boolean; channel_id: string }>(
     `/campaigns/enquiries/${id}/reply`,
-    { message },
+    { message, attachments },
   );
   return data;
 }
