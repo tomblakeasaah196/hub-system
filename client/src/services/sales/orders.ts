@@ -117,3 +117,26 @@ export async function cancelOrder(
   );
   return data;
 }
+
+export interface MarkPaidResponse {
+  ok: boolean;
+  already?: boolean;
+  order_id?: string;
+  status?: string;
+}
+
+/**
+ * Admin "Mark as Paid" for a payment_pending web order whose online
+ * payment confirmation never arrived (currently used for Optimus Pay,
+ * whose Transaction Notification webhook is down upstream).
+ */
+export async function markOrderPaid(
+  orderId: string,
+  payload: { reference?: string } = {},
+): Promise<MarkPaidResponse> {
+  const { data } = await api.post<MarkPaidResponse>(
+    `/sales/orders/${orderId}/mark-paid`,
+    payload,
+  );
+  return data;
+}

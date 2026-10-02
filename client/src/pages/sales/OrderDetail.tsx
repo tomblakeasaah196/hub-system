@@ -1,13 +1,16 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { FileText, Truck, ExternalLink, ArrowLeft } from "lucide-react";
+import { FileText, Truck, ExternalLink, ArrowLeft, CheckCircle } from "lucide-react";
 import { PageHeader } from "@components/ui/PageHeader";
 import { Button } from "@components/ui/Button";
 import { Skeleton } from "@components/ui/Skeleton";
 import { SalesStatusBadge } from "@components/sales/shared/SalesStatusBadge";
 import { LineItemsTable } from "@components/sales/shared/LineItemsTable";
-import { HandToLogisticsModal } from "@components/sales/modals/SalesModals";
+import {
+  HandToLogisticsModal,
+  MarkOrderPaidModal,
+} from "@components/sales/modals/SalesModals";
 import { getOrder, generateInvoice } from "@services/sales/orders";
 import { fmtDate, fmtMoney } from "@lib/format";
 import { showToast } from "@hooks/useToast";
@@ -24,6 +27,7 @@ export default function OrderDetail() {
   const { currency } = useActiveBusiness();
 
   const [showLogistics, setShowLogistics] = useState(false);
+  const [showMarkPaid, setShowMarkPaid] = useState(false);
   const [invoiceDueDate, setInvoiceDueDate] = useState("");
 
   const { data: order, isLoading } = useQuery({
@@ -67,6 +71,11 @@ export default function OrderDetail() {
   const isDelivery = order.fulfilment_type === "delivery";
   const canHandToLogistics = isDelivery && order.status === "confirmed";
   const canGenerateInvoice = !hasInvoice && order.status !== "cancelled";
+  // Manual "Mark as Paid" — only for web checkouts still awaiting payment.
+  // Currently used because Optimus Pay webhooks are down upstream, but it's
+  // provider-agnostic: any payment_pending web order can be settled by hand.
+  const canMarkPaid =
+    order.status === "payment_pending" && order.source === "web";
 
   return (
     <div className="px-4 sm:px-8 py-6 max-w-7xl mx-auto space-y-6">
@@ -243,6 +252,17 @@ export default function OrderDetail() {
               Actions
             </h3>
 
+            {canMarkPaid && (
+              <Button
+                variant="gold"
+                className="w-full justify-start"
+                onClick={() => setShowMarkPaid(true)}
+              >
+                <CheckCircle className="h-4 w-4" />
+                Mark as Paid
+              </Button>
+            )}
+
             {canHandToLogistics && (
               <Button
                 className="w-full justify-start"
@@ -275,6 +295,16 @@ export default function OrderDetail() {
           contactPhone={order.primary_phone ?? ""}
           deliveryAddress={order.delivery_address ?? ""}
           onDispatched={() => setShowLogistics(false)}
+        />
+      )}
+
+      {showMarkPaid && (
+        <MarkOrderPaidModal
+          open={showMarkPaid}
+          onClose={() => setShowMarkPaid(false)}
+          orderId={order.order_id}
+          orderNumber={order.order_number}
+          totalLabel={fmtMoney(order.total_amount, currency)}
         />
       )}
     </div>

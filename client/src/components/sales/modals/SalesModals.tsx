@@ -835,3 +835,106 @@ export function DiscountApprovalModal({
     </Modal>
   );
 }
+
+// ── MarkOrderPaidModal ─────────────────────────────────────────────────────────
+//
+// Manually mark a payment_pending web order as paid. Used when the Optimus Pay
+// Transaction Notification webhook doesn't arrive (provider issue), so staff
+// confirm the inflow from the bank statement and click here.
+//
+// Note: the modal is unaware of the payment provider — the backend runs the
+// same stock, journal, settle, email pipeline regardless, and stamps an audit
+// trail of who clicked + the external reference typed below.
+
+import { useState as useStatePaid } from "react";
+import { markOrderPaid } from "@services/sales/orders";
+
+interface MarkOrderPaidModalProps {
+  open: boolean;
+  onClose: () => void;
+  orderId: string;
+  orderNumber: string;
+  totalLabel: string;
+}
+
+export function MarkOrderPaidModal({
+  open,
+  onClose,
+  orderId,
+  orderNumber,
+  totalLabel,
+}: MarkOrderPaidModalProps) {
+  const qc = useQueryClient();
+  const [reference, setReference] = useStatePaid("");
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      markOrderPaid(orderId, { reference: reference.trim() || undefined }),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ["order", orderId] });
+      qc.invalidateQueries({ queryKey: ["sales-orders"] });
+      qc.invalidateQueries({ queryKey: ["sales-kpis"] });
+      showToast.success(
+        res.already
+          ? `Order ${orderNumber} was already paid — audit recorded`
+          : `Order ${orderNumber} marked paid — confirmation sent`,
+      );
+      setReference("");
+      onClose();
+    },
+    onError: (err) => showToast.error(errMsg(err)),
+  });
+
+  return (
+    <Modal
+      open={open}
+      onClose={() => {
+        if (mutation.isPending) return;
+        setReference("");
+        onClose();
+      }}
+      title="Mark order as paid"
+      size="md"
+      surface="light"
+      footer={
+        <div className="flex justify-end gap-3">
+          <Button variant="ghost" onClick={onClose} disabled={mutation.isPending}>
+            Cancel
+          </Button>
+          <Button onClick={() => mutation.mutate()} loading={mutation.isPending}>
+            Confirm paid
+          </Button>
+        </div>
+      }
+    >
+      <p className="mb-4 text-sm text-brand-smoke/80">
+        You're about to manually settle{" "}
+        <span className="font-medium text-brand-accent">{orderNumber}</span> for{" "}
+        <span className="font-medium">{totalLabel}</span>. This will decrement
+        stock, post the revenue and COGS journals, settle the sales order, and
+        send the customer their order confirmation email.
+      </p>
+      <div className="rounded-lg border border-amber-300/40 bg-amber-50 px-3 py-2.5 mb-4">
+        <p className="text-[11px] text-amber-900">
+          Only use this when you've already confirmed the inflow on the bank
+          statement or Optimus dashboard — this action is auditable but can't
+          be undone from here.
+        </p>
+      </div>
+      <div className="space-y-1.5">
+        <label className="block text-xs font-medium text-brand-smoke">
+          Payment reference (optional)
+        </label>
+        <Input
+          placeholder="e.g. Optimus txn ID or bank reference"
+          value={reference}
+          onChange={(e) => setReference(e.target.value)}
+          disabled={mutation.isPending}
+        />
+        <p className="text-[11px] text-brand-smoke/70">
+          Stored on the order for audit alongside who marked it paid.
+        </p>
+      </div>
+    </Modal>
+  );
+}

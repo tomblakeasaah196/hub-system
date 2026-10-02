@@ -6,6 +6,7 @@ const { body, param } = require("express-validator");
 const validate = require("../../middleware/validateBody");
 const { can } = require("../../middleware/permissions");
 const service = require("./sales.service");
+const storeService = require("../store/store.service");
 
 // ─── Quotations ──────────────────────────────────────────────────────────────
 
@@ -273,6 +274,31 @@ router.post(
     try {
       res.json(
         await service.cancelOrder(req.business, req.params.id, req.user),
+      );
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// POST /api/sales/orders/:id/mark-paid — manually settle a web order whose
+// online payment confirmation (Optimus Pay webhook) never arrived. Delegates
+// to the store module so stock, journals, sales-order settle and the customer
+// confirmation email all follow the same path as the webhook would.
+router.post(
+  "/orders/:id/mark-paid",
+  param("id").isUUID(),
+  body("reference").optional().isString().isLength({ max: 200 }),
+  validate,
+  can("sales", "edit"),
+  async (req, res, next) => {
+    try {
+      res.json(
+        await storeService.markWebOrderPaidManually({
+          salesOrderId: req.params.id,
+          reference: req.body?.reference,
+          user: req.user,
+        }),
       );
     } catch (err) {
       next(err);
