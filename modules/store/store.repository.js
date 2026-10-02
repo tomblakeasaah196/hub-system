@@ -659,6 +659,38 @@ async function setOrderStatus(client, orderId, status) {
   return row || null;
 }
 
+// Look the store.orders row up by its linked diffusers.sales_orders id.
+// Used by the admin "Mark as Paid" flow — staff click on a sales order row
+// in the ERP, we need to find the underlying web order to fulfil.
+async function findOrderBySalesOrderId(client, salesOrderId) {
+  const {
+    rows: [row],
+  } = await client.query(
+    `SELECT * FROM store.orders WHERE sales_order_id = $1`,
+    [salesOrderId],
+  );
+  return row || null;
+}
+
+// Stamp the manual-payment audit columns on diffusers.sales_orders.
+// Written in the same transaction as settleSalesOrderForWeb so a sales
+// order is never marked paid-by-hand without also recording who did it.
+async function recordManualPaymentOnSalesOrder(
+  client,
+  salesOrderId,
+  { reference, userId },
+) {
+  await client.query(
+    `UPDATE diffusers.sales_orders
+        SET manual_payment_ref      = $2,
+            manually_marked_paid_by = $3,
+            manually_marked_paid_at = now(),
+            updated_at              = now()
+      WHERE order_id = $1`,
+    [salesOrderId, reference || null, userId || null],
+  );
+}
+
 // ── ENQUIRIES ────────────────────────────────────────────────
 
 async function insertEnquiry(client, e) {
@@ -899,6 +931,8 @@ module.exports = {
   findOrderByRef,
   markOrderPaidWithJournals,
   setOrderStatus,
+  findOrderBySalesOrderId,
+  recordManualPaymentOnSalesOrder,
   // enquiries
   insertEnquiry,
   listEnquiries,

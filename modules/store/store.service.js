@@ -953,6 +953,233 @@ async function fulfillOptimusOrder(transactionRef, { paidKobo = 0 } = {}) {
 }
 
 /**
+ * Admin "Mark as Paid" — manually settle a web order whose online payment
+ * confirmation never arrived (e.g. Optimus Pay webhooks are currently down
+ * on the provider's side, so the Transaction Notification never fires).
+ *
+ * Entry point is the diffusers.sales_orders.order_id the ERP already shows
+ * in Sales → Orders; from there we resolve the underlying store.orders row
+ * and run the SAME fulfilment pipeline as fulfillOptimusOrder (stock → rev
+ * journal → COGS journal → mark paid → settle sales order → confirmation
+ * email). The ONLY differences versus the webhook path are:
+ *
+ *   • there is no inflow amount to compare against, so the underpayment
+ *     guard is replaced by the manual-payment audit stamp (who clicked,
+ *     when, against which external reference);
+ *   • the function expects to be called with an authenticated staff user
+ *     so the audit stamp is meaningful.
+ *
+ * All downstream idempotency / atomicity (markOrderPaidWithJournals is the
+ * single row-level flip; a lost race is treated as success) is unchanged,
+ * so re-clicking Mark as Paid on an order the webhook later caught up to
+ * is safe.
+ */
+async function markWebOrderPaidManually({ salesOrderId, reference, user }) {
+  if (!salesOrderId) {
+    throw Object.assign(new Error("salesOrderId is required"), { status: 400 });
+  }
+
+  let resolvedOrderId = null;
+  try {
+    return await withBusinessContext(STORE_BUSINESS, async (client) => {
+      // 1. Resolve the store order via the sales-order bridge.
+      const order = await repo.findOrderBySalesOrderId(client, salesOrderId);
+      if (!order) {
+        throw Object.assign(
+          new Error("No web order is linked to this sales order"),
+          { status: 404 },
+        );
+      }
+      resolvedOrderId = order.id;
+
+      // 2. Idempotency — already-paid orders short-circuit, same as webhook.
+      if (order.status !== "pending") {
+        // Still stamp the audit columns so staff know a manual confirmation
+        // was recorded (useful when the webhook later catches up).
+        await repo.recordManualPaymentOnSalesOrder(client, salesOrderId, {
+          reference,
+          userId: user?.user_id,
+        });
+        return {
+          ok: true,
+          already: true,
+          order_id: order.id,
+          status: order.status,
+        };
+      }
+
+      const lines = order.items || [];
+
+      // Default outbound stock location.
+      const { rows: [stockLoc] } = await client.query(
+        `SELECT location_id FROM stock_locations WHERE is_active = true ORDER BY created_at LIMIT 1`,
+      );
+
+      // 3. Stock movements.
+      for (const item of lines) {
+        try {
+          await stockService.recordMovement(client, {
+            business: STORE_BUSINESS,
+            productId: item.erp_product_id,
+            movementType: "sold",
+            quantity: item.quantity,
+            direction: -1,
+            fromLocationId: stockLoc?.location_id || null,
+            referenceType: "store_order",
+            referenceId: order.id,
+            performedBy: user?.user_id || config.systemUserId,
+          });
+        } catch (err) {
+          logger.error(
+            `[store/manual] stock movement failed for order ${order.id}, product ${item.erp_product_id}: ${err.message}`,
+          );
+          throw err;
+        }
+      }
+
+      // 4. Revenue journal — identical COA to the webhook paths.
+      const { getVatRate } = require("../../config/businesses");
+      const vatRate = getVatRate(STORE_BUSINESS);
+      const grossNaira = Number(order.total_kobo) / 100;
+      const netNaira = parseFloat((grossNaira / (1 + vatRate)).toFixed(2));
+      const vatNaira = parseFloat((grossNaira - netNaira).toFixed(2));
+
+      const bankAcc = await journalService.getAccountId(client, "1210");
+      const salesAcc = await journalService.getAccountId(client, "4100");
+      const vatAcc = await journalService.getAccountId(client, "2210");
+
+      let revenueEntry = null;
+      if (bankAcc && salesAcc) {
+        const revLines = [
+          { account_id: bankAcc, debit: grossNaira, credit: 0 },
+          { account_id: salesAcc, debit: 0, credit: netNaira },
+        ];
+        if (vatAcc && vatNaira > 0) {
+          revLines.push({ account_id: vatAcc, debit: 0, credit: vatNaira });
+        } else {
+          revLines[1].credit = grossNaira;
+        }
+        revenueEntry = await journalService.postEntry(client, {
+          business: STORE_BUSINESS,
+          description: `Web order ${order.id} — manually marked paid${
+            reference ? ` (ref: ${reference})` : ""
+          }`,
+          referenceType: "store_order",
+          referenceId: order.id,
+          postedBy: user?.user_id || config.systemUserId,
+          lines: revLines,
+        });
+      } else {
+        logger.error(
+          `[store/manual] revenue journal skipped for order ${order.id}: missing COA`,
+        );
+      }
+
+      // 5. COGS journal — weighted-average cost via stockService.
+      const costable = lines
+        .filter((l) => l.erp_product_id)
+        .map((l) => ({ product_id: l.erp_product_id, quantity: l.quantity }));
+      let cogsEntry = null;
+      if (costable.length > 0) {
+        const { total_cost } = await stockService.calculateSaleCOGS(
+          client,
+          costable,
+        );
+        if (total_cost && total_cost > 0) {
+          const cogsAcc = await journalService.getAccountId(client, "5000");
+          const invAcc = await journalService.getAccountId(client, "1410");
+          if (cogsAcc && invAcc) {
+            cogsEntry = await journalService.postEntry(client, {
+              business: STORE_BUSINESS,
+              description: `COGS — Web order ${order.id} (manual mark paid)`,
+              referenceType: "store_order_cogs",
+              referenceId: order.id,
+              postedBy: user?.user_id || config.systemUserId,
+              lines: [
+                { account_id: cogsAcc, debit: total_cost, credit: 0 },
+                { account_id: invAcc, debit: 0, credit: total_cost },
+              ],
+            });
+          } else {
+            logger.warn(
+              `[store/manual] COGS journal skipped for ${order.id}: missing COA`,
+            );
+          }
+        }
+      }
+
+      // 6. Flip to paid atomically (row-level guard against double-fulfilment).
+      const paidOrder = await repo.markOrderPaidWithJournals(client, order.id, {
+        journalEntryId: revenueEntry?.entry_id || revenueEntry?.entryId || null,
+        cogsEntryId: cogsEntry?.entry_id || cogsEntry?.entryId || null,
+      });
+      if (!paidOrder) {
+        throw Object.assign(new Error("Order was concurrently fulfilled"), {
+          status: 409,
+          alreadyFulfilled: true,
+        });
+      }
+
+      // 7. Settle the linked ERP sales order AND stamp the manual-payment
+      //    audit columns so we never lose the trail of who clicked.
+      try {
+        await syncPaidWebSalesOrder(client, order);
+      } catch (err) {
+        logger.error(
+          `[store/manual] sales order settle failed for ${order.id}: ${err.message}`,
+        );
+        throw err;
+      }
+      await repo.recordManualPaymentOnSalesOrder(client, salesOrderId, {
+        reference,
+        userId: user?.user_id,
+      });
+
+      if (order.customer_id) {
+        await repo.incrementCustomerOrders(client, order.customer_id);
+      }
+
+      // 8. Confirmation email — best effort, matches the webhook path.
+      try {
+        const addr = order.delivery_address || {};
+        const { subject, html } = renderEmail(
+          "order_confirmation",
+          STORE_BUSINESS,
+          {
+            customer_name: addr.full_name,
+            order_id: order.id,
+            items: order.items || [],
+            total: grossNaira,
+          },
+        );
+        await sendEmail({
+          to: addr.email,
+          subject,
+          html,
+          business: STORE_BUSINESS,
+        });
+      } catch (err) {
+        logger.warn(
+          `[store/manual] confirmation email failed for ${order.id}: ${err.message}`,
+        );
+      }
+
+      return { ok: true, order_id: order.id, status: "paid" };
+    });
+  } catch (err) {
+    if (err && err.alreadyFulfilled) {
+      return {
+        ok: true,
+        already: true,
+        order_id: resolvedOrderId,
+        status: "paid",
+      };
+    }
+    throw err;
+  }
+}
+
+/**
  * Verify the Paystack webhook HMAC signature. The raw request body
  * (Buffer) must be passed — not the parsed JSON.
  */
@@ -1346,6 +1573,7 @@ module.exports = {
   getOrder,
   verifyAndFulfil,
   fulfillOptimusOrder,
+  markWebOrderPaidManually,
   getOptimusOrderStatus,
   verifyWebhookSignature,
   // newsletter + enquiries

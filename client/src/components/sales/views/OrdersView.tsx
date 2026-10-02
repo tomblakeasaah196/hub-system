@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { Package, Search, Plus, CheckCircle } from "lucide-react";
+import { Package, Search, Plus, CheckCircle, Banknote } from "lucide-react";
 import { useActiveBusiness } from "@hooks/useActiveBusiness";
 import { listOrders, approveCampaignProof } from "@services/sales/orders";
+import { MarkOrderPaidModal } from "@components/sales/modals/SalesModals";
 import { SalesStatusBadge } from "@components/sales/shared/SalesStatusBadge";
 import { Button } from "@components/ui/Button";
 import { Input } from "@components/ui/Input";
@@ -32,6 +33,11 @@ export function OrdersView() {
   const [fulfilmentType, setFulfilmentType] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [payTarget, setPayTarget] = useState<{
+    order_id: string;
+    order_number: string;
+    total_amount: number;
+  } | null>(null);
   const PAGE_SIZE = 50;
 
   const { data, isLoading } = useQuery({
@@ -247,6 +253,23 @@ export function OrdersView() {
                             Approve
                           </button>
                         )}
+                        {o.status === "payment_pending" && o.source === "web" && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPayTarget({
+                                order_id: o.order_id,
+                                order_number: o.order_number,
+                                total_amount: o.total_amount,
+                              });
+                            }}
+                            className="inline-flex items-center gap-1 rounded-full bg-amber-900/20 px-2 py-0.5 text-[10px] font-medium text-amber-400 hover:bg-amber-900/30 transition-colors"
+                            title="Mark this web order paid (Optimus webhook workaround)"
+                          >
+                            <Banknote className="h-3 w-3" />
+                            Mark Paid
+                          </button>
+                        )}
                         <span className="text-xs text-brand-smoke">
                           {fmtDate(o.created_at)}
                         </span>
@@ -258,6 +281,16 @@ export function OrdersView() {
             </tbody>
           </table>
         </div>
+      )}
+
+      {payTarget && (
+        <MarkOrderPaidModal
+          open={!!payTarget}
+          onClose={() => setPayTarget(null)}
+          orderId={payTarget.order_id}
+          orderNumber={payTarget.order_number}
+          totalLabel={fmtMoney(payTarget.total_amount, currency)}
+        />
       )}
 
       {/* Pagination */}
