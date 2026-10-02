@@ -5,7 +5,8 @@
  * filter by status, and open each one in a modal that shows the full
  * reply history and lets staff send a follow-up (with attachments).
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Search, Mail, Phone, MessageSquare } from "lucide-react";
 import { Topbar } from "@/components/shell/Topbar";
@@ -35,9 +36,11 @@ const STATUS_TONE: Record<EnquiryStatus, "gold" | "info" | "sage" | "neutral"> =
 
 export default function EnquiriesHome() {
   const qc = useQueryClient();
+  const [params, setParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<EnquiryStatus | "">("");
-  const [openEnquiry, setOpenEnquiry] = useState<Enquiry | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [openInitial, setOpenInitial] = useState<Enquiry | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["campaigns", "enquiries", search, status],
@@ -47,6 +50,31 @@ export default function EnquiriesHome() {
         status: (status || undefined) as EnquiryStatus | undefined,
       }),
   });
+
+  // Deep-link: notifications and other surfaces may land here with
+  // ?focus=<enquiry-id> to open that enquiry's thread immediately.
+  useEffect(() => {
+    const focus = params.get("focus");
+    if (focus && focus !== openId) {
+      setOpenId(focus);
+      const match = data?.data?.find((e) => e.id === focus) ?? null;
+      setOpenInitial(match);
+    }
+  }, [params, data?.data, openId]);
+
+  function closeModal() {
+    setOpenId(null);
+    setOpenInitial(null);
+    if (params.get("focus")) {
+      params.delete("focus");
+      setParams(params, { replace: true });
+    }
+  }
+
+  function openEnquiry(e: Enquiry) {
+    setOpenId(e.id);
+    setOpenInitial(e);
+  }
 
   const mutation = useMutation({
     mutationFn: ({ id, next }: { id: string; next: EnquiryStatus }) =>
@@ -151,7 +179,7 @@ export default function EnquiriesHome() {
               <EnquiryCard
                 key={e.id}
                 enquiry={e}
-                onOpen={() => setOpenEnquiry(e)}
+                onOpen={() => openEnquiry(e)}
                 onSetStatus={(next) => mutation.mutate({ id: e.id, next })}
                 pending={mutation.isPending}
               />
@@ -161,10 +189,10 @@ export default function EnquiriesHome() {
       </div>
 
       <EnquiryDetailModal
-        open={!!openEnquiry}
-        enquiryId={openEnquiry?.id ?? null}
-        initial={openEnquiry ?? undefined}
-        onClose={() => setOpenEnquiry(null)}
+        open={!!openId}
+        enquiryId={openId}
+        initial={openInitial ?? undefined}
+        onClose={closeModal}
       />
     </>
   );

@@ -1380,10 +1380,127 @@ async function submitEnquiry(data) {
       { status: 400 },
     );
   }
-  return withStoreContext(async (client) => {
-    const enquiry = await repo.insertEnquiry(client, data);
-    return { ok: true, enquiry_id: enquiry.id };
+  const enquiry = await withStoreContext(async (client) =>
+    repo.insertEnquiry(client, data),
+  );
+
+  // Fire-and-forget staff notifications (in-app, push, email). A dispatch
+  // failure must never fail the storefront submission.
+  setImmediate(() => {
+    notifyStaffOfEnquiry(enquiry).catch((err) =>
+      logger.warn(`[store] enquiry notification failed: ${err.message}`),
+    );
   });
+
+  return { ok: true, enquiry_id: enquiry.id };
+}
+
+// Notify every staff user with campaigns:view permission across all three
+// channels: in-app (socket + shared.notifications row), push (web push,
+// best-effort via notifService) and email. Per-user channel toggles in
+// shared.notification_preferences are respected — email_enabled defaults
+// to true so unconfigured users still receive it.
+async function notifyStaffOfEnquiry(enquiry) {
+  const staff = await withSharedContext(async (client) => {
+    const { rows } = await client.query(
+      `SELECT DISTINCT u.user_id, u.email, u.default_business,
+              COALESCE(c.display_name, split_part(u.email, '@', 1)) AS display_name,
+              COALESCE(np.email_enabled, true) AS email_enabled,
+              COALESCE(np.in_app, true)        AS in_app_enabled,
+              COALESCE(np.push_enabled, true)  AS push_enabled
+       FROM shared.users u
+       LEFT JOIN shared.staff_profiles sp ON sp.profile_id = u.staff_profile_id
+       LEFT JOIN shared.contacts c ON c.contact_id = sp.contact_id
+       LEFT JOIN shared.notification_preferences np
+              ON np.user_id = u.user_id AND np.notification_type = 'enquiry'
+       WHERE u.is_active = true
+         AND EXISTS (
+           SELECT 1
+           FROM shared.user_roles ur
+           JOIN shared.permissions p ON p.role_id = ur.role_id
+           WHERE ur.user_id = u.user_id
+             AND p.module = 'campaigns'
+             AND p.action = 'view'
+         )`,
+    );
+    return rows;
+  });
+
+  if (!staff.length) return;
+
+  const title = `New enquiry — ${enquiry.type}`;
+  const preview = (enquiry.message || "").trim().slice(0, 160);
+  const body = `${enquiry.name} (${enquiry.email}): ${preview}${
+    enquiry.message && enquiry.message.length > 160 ? "…" : ""
+  }`;
+  const actionUrl = `/campaigns/enquiries?focus=${enquiry.id}`;
+
+  for (const user of staff) {
+    // in-app row + socket emit + push (push is skipped internally if
+    // user is online or push is not configured)
+    try {
+      await withSharedContext((client) =>
+        notifService.create(client, {
+          userId: user.user_id,
+          business: user.default_business || STORE_BUSINESS,
+          type: "enquiry",
+          title,
+          body,
+          referenceType: "enquiry",
+          referenceId: enquiry.id,
+          actionUrl,
+        }),
+      );
+    } catch (err) {
+      logger.warn(
+        `[store] in-app notify failed for ${user.user_id}: ${err.message}`,
+      );
+    }
+
+    // Email — only if the user opted in and has an address on file.
+    if (user.email_enabled && user.email) {
+      try {
+        const esc = (s) =>
+          String(s || "").replace(/[&<>"']/g, (c) =>
+            ({
+              "&": "&amp;",
+              "<": "&lt;",
+              ">": "&gt;",
+              '"': "&quot;",
+              "'": "&#39;",
+            }[c]),
+          );
+        const html = `
+          <h2 style="font-family:Georgia,serif;font-size:20px;font-weight:normal;color:#2f2b26;margin:0 0 16px 0;">
+            New enquiry received
+          </h2>
+          <p style="font-size:13px;color:#6e675e;margin:0 0 4px 0;">
+            <strong>${esc(enquiry.type)}</strong>
+          </p>
+          <p style="margin:0 0 16px 0;">
+            From <strong>${esc(enquiry.name)}</strong>
+            &lt;${esc(enquiry.email)}&gt;${enquiry.phone ? ` · ${esc(enquiry.phone)}` : ""}
+          </p>
+          <blockquote style="margin:16px 0;padding:12px 16px;border-left:3px solid #c9a86c;background:#faf7f1;color:#3d3833;white-space:pre-wrap;">
+${esc(enquiry.message)}
+          </blockquote>
+          <p style="font-size:13px;color:#6e675e;">
+            Open it in the Hub to reply or follow up.
+          </p>
+        `;
+        await sendEmail({
+          to: user.email,
+          subject: `New enquiry — ${enquiry.type}`,
+          html,
+          business: STORE_BUSINESS,
+        });
+      } catch (err) {
+        logger.warn(
+          `[store] enquiry email failed for ${user.email}: ${err.message}`,
+        );
+      }
+    }
+  }
 }
 
 // ── ENQUIRIES (ERP inbox) ────────────────────────────────────
