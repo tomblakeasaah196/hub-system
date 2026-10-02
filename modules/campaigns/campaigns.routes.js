@@ -170,6 +170,23 @@ router.get("/enquiries", can("campaigns", "view"), async (req, res, next) => {
   }
 });
 
+// Full detail (enquiry + the thread we dispatched replies through, so
+// the modal can show the original message, every staff reply, and the
+// attached documents).
+router.get(
+  "/enquiries/:id",
+  param("id").isUUID(),
+  validate,
+  can("campaigns", "view"),
+  async (req, res, next) => {
+    try {
+      res.json(await storeService.getEnquiryWithThread(req.params.id));
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
 router.patch(
   "/enquiries/:id/status",
   param("id").isUUID(),
@@ -190,7 +207,8 @@ router.patch(
 router.post(
   "/enquiries/:id/reply",
   param("id").isUUID(),
-  body("message").notEmpty(),
+  body("message").optional({ nullable: true }).isString(),
+  body("attachments").optional().isArray(),
   validate,
   can("campaigns", "edit"),
   async (req, res, next) => {
@@ -200,6 +218,7 @@ router.post(
           req.params.id,
           req.body.message,
           req.user,
+          req.body.attachments || [],
         ),
       );
     } catch (err) {

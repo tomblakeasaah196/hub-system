@@ -2,25 +2,25 @@
  * EnquiriesHome — storefront enquiries inbox.
  * Route: /campaigns/enquiries
  * View partnership/wholesale/gifting enquiries submitted from the site,
- * filter by status, and move them through new → read → replied → closed.
+ * filter by status, and open each one in a modal that shows the full
+ * reply history and lets staff send a follow-up (with attachments).
  */
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Search, Mail, Phone, Send } from "lucide-react";
+import { Search, Mail, Phone, MessageSquare } from "lucide-react";
 import { Topbar } from "@/components/shell/Topbar";
 import { PageHeader } from "@components/ui/PageHeader";
 import { Input } from "@components/ui/Input";
-import { Button } from "@components/ui/Button";
 import { Badge } from "@components/ui/Badge";
 import { EmptyState } from "@components/ui/EmptyState";
 import { showToast } from "@hooks/useToast";
 import {
   listEnquiries,
   setEnquiryStatus,
-  replyToEnquiry,
   type Enquiry,
   type EnquiryStatus,
 } from "@services/campaigns/campaigns";
+import { EnquiryDetailModal } from "./EnquiryDetailModal";
 
 const WORD_LIMIT = 40;
 
@@ -37,6 +37,7 @@ export default function EnquiriesHome() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<EnquiryStatus | "">("");
+  const [openEnquiry, setOpenEnquiry] = useState<Enquiry | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["campaigns", "enquiries", search, status],
@@ -150,6 +151,7 @@ export default function EnquiriesHome() {
               <EnquiryCard
                 key={e.id}
                 enquiry={e}
+                onOpen={() => setOpenEnquiry(e)}
                 onSetStatus={(next) => mutation.mutate({ id: e.id, next })}
                 pending={mutation.isPending}
               />
@@ -157,23 +159,29 @@ export default function EnquiriesHome() {
           </div>
         )}
       </div>
+
+      <EnquiryDetailModal
+        open={!!openEnquiry}
+        enquiryId={openEnquiry?.id ?? null}
+        initial={openEnquiry ?? undefined}
+        onClose={() => setOpenEnquiry(null)}
+      />
     </>
   );
 }
 
 function EnquiryCard({
   enquiry: e,
+  onOpen,
   onSetStatus,
   pending,
 }: {
   enquiry: Enquiry;
+  onOpen: () => void;
   onSetStatus: (next: EnquiryStatus) => void;
   pending: boolean;
 }) {
-  const qc = useQueryClient();
   const [expanded, setExpanded] = useState(false);
-  const [replyOpen, setReplyOpen] = useState(false);
-  const [reply, setReply] = useState("");
 
   const words = e.message.trim().split(/\s+/);
   const isLong = words.length > WORD_LIMIT;
@@ -181,17 +189,6 @@ function EnquiryCard({
     isLong && !expanded
       ? words.slice(0, WORD_LIMIT).join(" ") + "…"
       : e.message;
-
-  const replyMutation = useMutation({
-    mutationFn: () => replyToEnquiry(e.id, reply.trim()),
-    onSuccess: () => {
-      showToast.success("Reply sent", `Delivered to ${e.email}`);
-      setReply("");
-      setReplyOpen(false);
-      qc.invalidateQueries({ queryKey: ["campaigns", "enquiries"] });
-    },
-    onError: () => showToast.error("Could not send reply"),
-  });
 
   return (
     <div className="rounded-2xl border border-white/5 bg-brand-charcoal p-4 sm:p-5">
@@ -207,12 +204,14 @@ function EnquiryCard({
           <div className="flex flex-wrap gap-x-4 gap-y-1 mt-2 text-xs text-brand-smoke">
             <a
               href={`mailto:${e.email}`}
+              onClick={(ev) => ev.stopPropagation()}
               className="flex items-center gap-1 hover:text-brand-accent"
             >
               <Mail className="h-3 w-3" /> {e.email}
             </a>
             <a
               href={`tel:${e.phone}`}
+              onClick={(ev) => ev.stopPropagation()}
               className="flex items-center gap-1 hover:text-brand-accent"
             >
               <Phone className="h-3 w-3" /> {e.phone}
@@ -223,14 +222,15 @@ function EnquiryCard({
           </div>
         </div>
 
-        {/* Status flow buttons */}
+        {/* Status flow buttons + open thread */}
         <div className="flex flex-wrap gap-1.5">
           <button
             type="button"
-            onClick={() => setReplyOpen((o) => !o)}
-            className="rounded-full border border-brand-accent/40 px-2.5 py-1 text-[0.7rem] text-brand-accent hover:bg-brand-accent/10 transition-all"
+            onClick={onOpen}
+            className="rounded-full border border-brand-accent/40 px-2.5 py-1 text-[0.7rem] text-brand-accent hover:bg-brand-accent/10 transition-all flex items-center gap-1"
           >
-            Reply
+            <MessageSquare className="h-3 w-3" />
+            Open thread
           </button>
           {STATUS_FLOW.filter((s) => s !== e.status).map((s) => (
             <button
@@ -246,9 +246,13 @@ function EnquiryCard({
         </div>
       </div>
 
-      <p className="mt-3 whitespace-pre-wrap text-sm text-brand-cloud/90 border-t border-white/5 pt-3">
+      <button
+        type="button"
+        onClick={onOpen}
+        className="mt-3 w-full text-left whitespace-pre-wrap text-sm text-brand-cloud/90 border-t border-white/5 pt-3 hover:text-brand-cream transition-colors"
+      >
         {shown}
-      </p>
+      </button>
       {isLong && (
         <button
           type="button"
@@ -257,37 +261,6 @@ function EnquiryCard({
         >
           {expanded ? "View less" : "View more"}
         </button>
-      )}
-
-      {/* Inline reply — dispatched through messaging (SmatComm) to their inbox */}
-      {replyOpen && (
-        <div className="mt-4 border-t border-white/5 pt-4 space-y-2">
-          <textarea
-            value={reply}
-            onChange={(ev) => setReply(ev.target.value)}
-            rows={4}
-            placeholder={`Write a reply to ${e.name}… (sent to their inbox via messaging)`}
-            className="w-full rounded-xl border border-white/10 bg-brand-graphite/30 px-3 py-2 text-sm text-brand-cream placeholder:text-brand-smoke/60 focus:border-brand-accent/40 focus:outline-none"
-          />
-          <div className="flex items-center justify-end gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setReplyOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              size="sm"
-              loading={replyMutation.isPending}
-              disabled={!reply.trim() || replyMutation.isPending}
-              onClick={() => replyMutation.mutate()}
-            >
-              <Send className="h-3.5 w-3.5" />
-              Send Reply
-            </Button>
-          </div>
-        </div>
       )}
     </div>
   );

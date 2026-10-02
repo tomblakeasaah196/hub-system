@@ -760,6 +760,18 @@ async function updateEnquiryStatus(client, id, status) {
   return row || null;
 }
 
+async function findEnquiryById(client, id) {
+  const {
+    rows: [row],
+  } = await client.query(
+    `SELECT id, name, email, phone, type, message, status, created_at
+     FROM store.enquiries
+     WHERE id = $1`,
+    [id],
+  );
+  return row || null;
+}
+
 // ── NEWSLETTER ───────────────────────────────────────────────
 
 async function findSubscriber(client, email) {
@@ -938,6 +950,7 @@ module.exports = {
   listEnquiries,
   enquiryCounts,
   updateEnquiryStatus,
+  findEnquiryById,
   // newsletter
   findSubscriber,
   listSubscribers,

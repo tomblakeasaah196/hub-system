@@ -1416,6 +1416,44 @@ async function setEnquiryStatus(id, status) {
   });
 }
 
+// Load one enquiry together with the messaging thread we created for it
+// (if any). This lets the ERP inbox show the original message AND every
+// staff reply we've dispatched, so follow-ups don't start blind.
+async function getEnquiryWithThread(id) {
+  const enquiry = await withStoreContext((client) =>
+    repo.findEnquiryById(client, id),
+  );
+  if (!enquiry) {
+    throw Object.assign(new Error("Enquiry not found"), { status: 404 });
+  }
+
+  const thread = await withSharedContext(async (client) => {
+    const { rows } = await client.query(
+      `SELECT c.channel_id, c.name, c.metadata, c.created_at, c.updated_at
+       FROM shared.message_channels c
+       WHERE c.channel_type = 'customer_thread'
+         AND c.metadata->>'source' = 'email'
+         AND lower(c.metadata->>'external_id') = lower($1)
+       ORDER BY c.updated_at DESC
+       LIMIT 1`,
+      [enquiry.email],
+    );
+    const channel = rows[0];
+    if (!channel) return { channel: null, messages: [] };
+
+    const messagingRepo = require("../../shared/messaging/messaging.repository");
+    const messages = await messagingRepo.listMessages(client, {
+      channelId: channel.channel_id,
+      userId: null,
+      before: null,
+      limit: 200,
+    });
+    return { channel, messages };
+  });
+
+  return { enquiry, ...thread };
+}
+
 // Reply to an enquiry THROUGH the messaging layer (SmatComm), so the reply
 // is threaded in the customer's conversation and dispatched out via the
 // email channel to their inbox — never opening an external mail client.
@@ -1425,9 +1463,11 @@ async function setEnquiryStatus(id, status) {
 // email (metadata.source='email', external_id=<email>) → send through
 // messaging.sendMessage, whose customer_thread dispatch routes via the SMTP
 // adapter to the customer's inbox. Then flip the enquiry to 'replied'.
-async function replyToEnquiry(enquiryId, message, user) {
-  if (!message || !message.trim()) {
-    throw Object.assign(new Error("Reply message is required"), {
+async function replyToEnquiry(enquiryId, message, user, attachments = []) {
+  const trimmed = (message || "").trim();
+  const atts = Array.isArray(attachments) ? attachments : [];
+  if (!trimmed && atts.length === 0) {
+    throw Object.assign(new Error("Reply message or attachment is required"), {
       status: 400,
     });
   }
@@ -1511,7 +1551,15 @@ async function replyToEnquiry(enquiryId, message, user) {
   // 3. Send through messaging — this writes the message AND dispatches
   //    externally (SMTP → customer's inbox) for customer_thread channels.
   const messagingService = require("../../shared/messaging/messaging.service");
-  await messagingService.sendMessage(channelId, { content: message }, user);
+  await messagingService.sendMessage(
+    channelId,
+    {
+      content: trimmed || null,
+      attachments: atts,
+      message_type: atts.length && !trimmed ? "document" : "text",
+    },
+    user,
+  );
 
   // 4. Mark the enquiry replied.
   await withStoreContext(async (client) => {
@@ -1590,6 +1638,7 @@ module.exports = {
   exportSubscribersCsv,
   submitEnquiry,
   listEnquiries,
+  getEnquiryWithThread,
   setEnquiryStatus,
   replyToEnquiry,
 };
